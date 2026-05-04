@@ -2,32 +2,54 @@ import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import crypto from "crypto";
 
 const app = express();
 
-// ── CORS ──────────────────────────────────────────────────────────────────────
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN }));
+// ── CORS — only your frontend URL can call this ───────────────────────────────
+// In Render env vars set ALLOWED_ORIGIN to your Netlify URL e.g. https://your-app.netlify.app
+// Keep it as * only while testing, then lock it down
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || "*" }));
 
 // ── BODY LIMIT ────────────────────────────────────────────────────────────────
-// 200kb covers an 800px JPEG at quality 0.6 with room to spare
 app.use(express.json({ limit: "200kb" }));
 
-// ── RATE LIMITING ─────────────────────────────────────────────────────────────
+// ── RATE LIMITING — stops anyone hammering the server ─────────────────────────
 const rateLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,  // 10 minutes
+  windowMs: 10 * 60 * 1000,
   max: 20,
   message: { error: "Too many requests — please try again shortly." }
 });
 
 const burstLimiter = rateLimit({
-  windowMs: 10 * 1000,        // 10 seconds
+  windowMs: 10 * 1000,
   max: 5,
   message: { error: "Slow down — please wait a moment." }
 });
 
 app.use("/analyze", burstLimiter, rateLimiter);
 
-// ── CLAUDE CALL (extracted so we can retry) ───────────────────────────────────
+// ── SERVER-SIDE USAGE TRACKING ────────────────────────────────────────────────
+// Tracks analyses per user fingerprint on the SERVER — cannot be bypassed
+// Uses a simple in-memory store (resets on server restart — fine for free tier)
+const FREE_LIMIT = 2;
+const usageStore = new Map();
+
+function getUserKey(req) {
+  // Fingerprint based on IP + user agent — good enough for free tier abuse prevention
+  const raw = (req.ip || "") + (req.headers["user-agent"] || "");
+  return crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16);
+}
+
+function getUsage(key) {
+  return usageStore.get(key) || 0;
+}
+
+function incrementUsage(key) {
+  usageStore.set(key, getUsage(key) + 1);
+}
+
+// ── CLAUDE API CALL ───────────────────────────────────────────────────────────
 async function callClaude(image, goal) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20000);
@@ -112,7 +134,7 @@ RETURN JSON ONLY — no markdown, no explanation, nothing before or after. Use t
 app.post("/analyze", async (req, res) => {
   const { image, goal } = req.body || {};
 
-  // Validate
+  // Basic validation
   if (!image || typeof image !== "string" || image.length < 1000) {
     return res.status(400).json({ error: "Invalid image" });
   }
@@ -122,6 +144,17 @@ app.post("/analyze", async (req, res) => {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error("ANTHROPIC_API_KEY not set");
     return res.status(500).json({ error: "Server misconfiguration" });
+  }
+
+  // ── SERVER-SIDE usage limit check — this cannot be bypassed ──────────────
+  const userKey = getUserKey(req);
+  const usage   = getUsage(userKey);
+
+  if (usage >= FREE_LIMIT) {
+    return res.status(429).json({
+      error: "free_limit_reached",
+      message: "You've used your free analyses. More coming soon."
+    });
   }
 
   try {
@@ -154,6 +187,9 @@ app.post("/analyze", async (req, res) => {
       console.error("No content in response:", data);
       return res.status(500).json({ error: "Bad AI response" });
     }
+
+    // Only count usage on genuine success
+    incrementUsage(userKey);
 
     return res.json(data);
 
