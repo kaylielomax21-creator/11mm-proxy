@@ -6,6 +6,9 @@ import crypto from "crypto";
 
 const app = express();
 
+// Required for Render — tells Express to trust the proxy headers
+app.set('trust proxy', 1);
+
 // ── CORS — only your frontend URL can call this ───────────────────────────────
 // In Render env vars set ALLOWED_ORIGIN to your Netlify URL e.g. https://your-app.netlify.app
 // Keep it as * only while testing, then lock it down
@@ -64,7 +67,7 @@ async function callClaude(image, goal) {
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-3-5-sonnet-latest",
         max_tokens: 1000,
         temperature: 0.4,
         system: `You are an expert makeup artist for 11 Million Mothers, a warm luxury wellness brand for mothers. Be tender, specific, and celebratory. You see the unique beauty in every face.
